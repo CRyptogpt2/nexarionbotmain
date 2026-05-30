@@ -1,4 +1,4 @@
-# ============================================================
+ # ============================================================
 # CELL 1 - INSTALL DEPENDENCIES
 # Run this cell first!
 # ============================================================
@@ -268,8 +268,7 @@ def mark_task_done(user_id, task_id):
         conn.close()
 
 init_db()
-
-# ============================================================
+============================================================
 # CELL 4 - DATABOOM API FUNCTIONS
 # ============================================================
 
@@ -535,4 +534,909 @@ async def cb_verify_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ref_reward = int(get_setting("referral_reward"))
         add_points(ref_row["referrer_id"], ref_reward, f"Referral Reward (user {uid})", "referral")
         conn = get_conn()
-        conn.execute("UPDATE referrals SET rewarded=1 WHERE 
+        conn.execute("UPDATE referrals SET rewarded=1 WHERE id=?", (ref_row["id"],))
+        conn.commit(); conn.close()
+        try:
+            await context.bot.send_message(
+                ref_row["referrer_id"],
+                f"🎉 Your referral completed onboarding!\n+{ref_reward} points added!"
+            )
+        except Exception:
+            pass
+
+    u = get_user(uid)
+    await query.edit_message_text(
+        f"🎉 <b>Onboarding Complete!</b>\n\n"
+        f"🎁 +{reward} points for following on X!\n"
+        f"💰 Total: <b>{u['points']} points</b>\n\n"
+        f"Welcome to Nexarion! 🚀",
+        parse_mode="HTML"
+    )
+    await show_home(update, context, user=u)
+
+print("✅ Onboarding loaded!")
+
+# ============================================================
+# CELL 6 - USER FEATURES
+# ============================================================
+
+async def cb_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await show_home_from_query(query, context)
+
+async def cb_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid        = query.from_user.id
+    u          = get_user(uid)
+    pts        = u["points"]
+    conv_pts   = int(get_setting("point_conversion_points"))
+    conv_naira = int(get_setting("point_conversion_naira"))
+    naira_val  = (pts / conv_pts) * conv_naira if pts >= conv_pts else 0
+
+    await query.edit_message_text(
+        f"💰 <b>Your Balance</b>\n\n"
+        f"🔵 Points: <b>{pts}</b>\n"
+        f"💵 Naira Value: <b>₦{naira_val:.2f}</b>\n\n"
+        f"📊 Rate: {conv_pts} pts = ₦{conv_naira}\n"
+        f"📉 Min Withdrawal: {get_setting('min_withdrawal')} pts",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
+        parse_mode="HTML"
+    )
+
+async def cb_referrals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid      = query.from_user.id
+    u        = get_user(uid)
+    ref_link = f"https://t.me/{BOT_USERNAME}?start={u['referral_code']}"
+    count    = get_referral_count(uid)
+    earnings = get_referral_earnings(uid)
+
+    await query.edit_message_text(
+        f"👥 <b>Your Referrals</b>\n\n"
+        f"🔗 Your Link:\n<code>{ref_link}</code>\n\n"
+        f"👥 Total Referrals: <b>{count}</b>\n"
+        f"💰 Earnings: <b>{earnings} pts</b>\n"
+        f"🎁 Per Referral: <b>{get_setting('referral_reward')} pts</b>\n\n"
+        f"Share your link and earn when friends complete onboarding!",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
+        parse_mode="HTML"
+    )
+
+async def cb_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid  = query.from_user.id
+    conn = get_conn()
+    tasks = conn.execute("SELECT * FROM tasks WHERE is_active=1").fetchall()
+    conn.close()
+
+    if not tasks:
+        await query.edit_message_text("📋 No tasks available right now. Check back later!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]))
+        return
+
+    buttons = []
+    for t in tasks:
+        done  = task_completed(uid, t["task_id"])
+        label = f"{'✅' if done else '🔲'} {t['title']} (+{t['reward']} pts)"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"task_{t['task_id']}")])
+    buttons.append([InlineKeyboardButton("🏠 Home", callback_data="home")])
+
+    await query.edit_message_text(
+        "📋 <b>Available Tasks</b>\n\nComplete tasks to earn points!",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def cb_task_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    await query.answer()
+    uid     = query.from_user.id
+    task_id = int(query.data.split("_")[1])
+    conn    = get_conn()
+    t       = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    conn.close()
+
+    if not t:
+        await query.answer("Task not found.", show_alert=True)
+        return
+
+    done   = task_completed(uid, task_id)
+    status = "✅ Completed" if done else "🔲 Not completed"
+    text = (
+        f"📋 <b>{t['title']}</b>\n\n"
+        f"{t['description']}\n\n"
+        f"🎁 Reward: <b>{t['reward']} pts</b>\n"
+        f"📌 Type: {t['task_type']}\n"
+        f"Status: {status}"
+    )
+    kb = []
+    if not done:
+        if t["link"]:
+            kb.append([InlineKeyboardButton("🔗 Open Link", callback_data=f"taskopen_{task_id}")])
+        kb.append([InlineKeyboardButton("✅ Mark Complete", callback_data=f"taskdone_{task_id}")])
+    kb.append([InlineKeyboardButton("◀️ Back", callback_data="tasks")])
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+
+async def cb_task_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    await query.answer()
+    uid     = query.from_user.id
+    task_id = int(query.data.split("_")[1])
+    conn    = get_conn()
+    t       = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    conn.close()
+    if t:
+        if "task_opened" not in context.user_data:
+            context.user_data["task_opened"] = set()
+        context.user_data["task_opened"].add(task_id)
+        await context.bot.send_message(uid, f"👉 Open this link:\n{t['link']}\n\nThen tap ✅ Mark Complete.")
+
+async def cb_task_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    await query.answer()
+    uid     = query.from_user.id
+    task_id = int(query.data.split("_")[1])
+
+    if task_completed(uid, task_id):
+        await query.answer("✅ Already completed!", show_alert=True)
+        return
+
+    conn = get_conn()
+    t    = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    conn.close()
+
+    opened = context.user_data.get("task_opened", set())
+    if t["link"] and task_id not in opened:
+        await query.answer("❌ Please open the link first!", show_alert=True)
+        return
+
+    if mark_task_done(uid, task_id):
+        add_points(uid, t["reward"], f"Task: {t['title']}")
+        await query.edit_message_text(
+            f"🎉 <b>Task Completed!</b>\n\n✅ {t['title']}\n🎁 +{t['reward']} points!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 More Tasks", callback_data="tasks")],
+                [InlineKeyboardButton("🏠 Home", callback_data="home")],
+            ]),
+            parse_mode="HTML"
+        )
+
+async def cb_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid   = query.from_user.id
+    u     = get_user(uid)
+    count = get_referral_count(uid)
+    join  = u["join_date"][:10] if u["join_date"] else "N/A"
+
+    await query.edit_message_text(
+        f"👤 <b>Your Profile</b>\n\n"
+        f"🆔 User ID: <code>{u['user_id']}</code>\n"
+        f"👤 Username: @{u['username'] or 'N/A'}\n"
+        f"💰 Points: <b>{u['points']}</b>\n"
+        f"👥 Referrals: <b>{count}</b>\n"
+        f"📈 Total Earned: <b>{u['total_earned']} pts</b>\n"
+        f"💸 Total Withdrawn: <b>{u['total_withdrawn']} pts</b>\n"
+        f"📅 Joined: <b>{join}</b>",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
+        parse_mode="HTML"
+    )
+
+async def cb_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    conn  = get_conn()
+    rows  = conn.execute(
+        "SELECT first_name, username, points FROM users WHERE is_banned=0 ORDER BY points DESC LIMIT 10"
+    ).fetchall()
+    conn.close()
+
+    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    lines  = ["🏆 <b>Top 10 Leaderboard</b>\n"]
+    for i, r in enumerate(rows):
+        name = r["first_name"] or f"@{r['username']}" or "User"
+        lines.append(f"{medals[i]} {name} — <b>{r['points']} pts</b>")
+
+    await query.edit_message_text("\n".join(lines),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
+        parse_mode="HTML")
+
+async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        f"❓ <b>How Nexarion Works</b>\n\n"
+        f"1️⃣ Join the channel & follow on X → earn points\n"
+        f"2️⃣ Complete tasks → earn more points\n"
+        f"3️⃣ Refer friends → earn <b>{get_setting('referral_reward')} pts</b> per referral\n"
+        f"4️⃣ Withdraw → {get_setting('point_conversion_points')} pts = ₦{get_setting('point_conversion_naira')} airtime\n\n"
+        f"💸 Minimum withdrawal: <b>{get_setting('min_withdrawal')} pts</b>\n\n"
+        f"📌 Find your referral link in the Referrals section.\n"
+        f"📩 Contact admin for issues.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
+        parse_mode="HTML"
+    )
+
+print("✅ User features loaded!")
+
+# ============================================================
+# CELL 7 - WITHDRAWAL SYSTEM (Fixed with Databoom API)
+# ============================================================
+
+async def cb_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    u   = get_user(uid)
+
+    min_w      = int(get_setting("min_withdrawal"))
+    conv_pts   = int(get_setting("point_conversion_points"))
+    conv_naira = int(get_setting("point_conversion_naira"))
+    daily_lim  = float(get_setting("daily_limit_naira"))
+    daily_used = get_daily_withdrawn(uid)
+    daily_left = daily_lim - daily_used
+
+    if u["points"] < min_w:
+        await query.edit_message_text(
+            f"❌ <b>Insufficient Points</b>\n\n"
+            f"You need at least <b>{min_w} pts</b> to withdraw.\n"
+            f"Your balance: <b>{u['points']} pts</b>\n\n"
+            f"Keep completing tasks and referring friends to earn more!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
+    if daily_left <= 0:
+        await query.edit_message_text(
+            f"❌ <b>Daily Limit Reached</b>\n\n"
+            f"You've used your daily limit of ₦{daily_lim:.0f}.\n"
+            f"Try again tomorrow!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
+    context.user_data["withdraw"] = {}
+    await query.edit_message_text(
+        f"💸 <b>Withdraw Airtime</b>\n\n"
+        f"💰 Your Points: <b>{u['points']}</b>\n"
+        f"📅 Daily Remaining: <b>₦{daily_left:.0f}</b>\n\n"
+        f"📱 Enter the phone number to receive airtime:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="home")]]),
+        parse_mode="HTML"
+    )
+    return AWAIT_PHONE
+
+async def withdraw_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = update.message.text.strip()
+    # Remove leading +234 or 234 and normalize
+    if phone.startswith("+234"):
+        phone = "0" + phone[4:]
+    elif phone.startswith("234") and len(phone) == 13:
+        phone = "0" + phone[3:]
+
+    if not (phone.isdigit() and len(phone) == 11):
+        await update.message.reply_text(
+            "❌ Invalid phone number!\n\nPlease enter a valid 11-digit Nigerian number (e.g. 08012345678):"
+        )
+        return AWAIT_PHONE
+
+    context.user_data["withdraw"]["phone"] = phone
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("MTN",    callback_data="net_MTN"),
+         InlineKeyboardButton("Airtel", callback_data="net_Airtel")],
+        [InlineKeyboardButton("Glo",    callback_data="net_Glo"),
+         InlineKeyboardButton("9mobile",callback_data="net_9mobile")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="home")],
+    ])
+    await update.message.reply_text(
+        f"📱 Phone: <b>{phone}</b>\n\n📡 Select your network:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    return AWAIT_NETWORK
+
+async def withdraw_network(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    await query.answer()
+    network = query.data.replace("net_", "")
+    context.user_data["withdraw"]["network"] = network
+
+    uid        = query.from_user.id
+    u          = get_user(uid)
+    conv_pts   = int(get_setting("point_conversion_points"))
+    conv_naira = int(get_setting("point_conversion_naira"))
+    daily_lim  = float(get_setting("daily_limit_naira"))
+    daily_used = get_daily_withdrawn(uid)
+    daily_left = daily_lim - daily_used
+
+    pts        = u["points"]
+    # Calculate max airtime based on points and daily limit
+    max_naira  = min((pts / conv_pts) * conv_naira, daily_left)
+    # Round down to nearest full conversion block
+    blocks     = int(max_naira / conv_naira)
+    pts_to_use = blocks * conv_pts
+    naira_amt  = blocks * conv_naira
+
+    if pts_to_use <= 0 or naira_amt <= 0:
+        await query.edit_message_text(
+            "❌ Unable to process withdrawal. Check your balance or daily limit.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]))
+        return ConversationHandler.END
+
+    context.user_data["withdraw"]["points"] = pts_to_use
+    context.user_data["withdraw"]["naira"]  = naira_amt
+
+    await query.edit_message_text(
+        f"💸 <b>Withdrawal Summary</b>\n\n"
+        f"📱 Phone: <b>{context.user_data['withdraw']['phone']}</b>\n"
+        f"📡 Network: <b>{network}</b>\n"
+        f"🔵 Points to deduct: <b>{pts_to_use}</b>\n"
+        f"💵 Airtime to receive: <b>₦{naira_amt:.0f}</b>\n\n"
+        f"⚠️ Points will be deducted immediately.\n\n"
+        f"Confirm withdrawal?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Confirm", callback_data="withdraw_confirm"),
+             InlineKeyboardButton("❌ Cancel",  callback_data="home")],
+        ]),
+        parse_mode="HTML"
+    )
+    return AWAIT_CONFIRM
+
+async def withdraw_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid   = query.from_user.id
+    u     = get_user(uid)
+    wd    = context.user_data.get("withdraw", {})
+
+    pts     = wd.get("points", 0)
+    naira   = wd.get("naira", 0)
+    phone   = wd.get("phone", "")
+    network = wd.get("network", "")
+
+    if u["points"] < pts:
+        await query.edit_message_text(
+            "❌ Insufficient points. Your balance may have changed.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]))
+        return ConversationHandler.END
+
+    # Show processing message
+    await query.edit_message_text(
+        f"⏳ <b>Processing your withdrawal...</b>\n\n"
+        f"📱 Sending ₦{naira:.0f} airtime to {phone}\n\n"
+        f"Please wait...",
+        parse_mode="HTML"
+    )
+
+    # Save withdrawal record first
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO withdrawals (user_id,phone,network,points,amount_naira,status,created_at)
+        VALUES (?,?,?,?,?,'processing',?)
+    """, (uid, phone, network, pts, naira, datetime.now().isoformat()))
+    wid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit(); conn.close()
+
+    # Deduct points immediately
+    deduct_points(uid, pts, f"Withdrawal ₦{naira:.0f} to {phone} ({network})")
+
+    # Call Databoom API
+    result = await databoom_buy_airtime(phone, network, naira, wid)
+
+    # Update withdrawal record with result
+    conn = get_conn()
+    if result["success"]:
+        conn.execute("UPDATE withdrawals SET status='paid', api_ref=?, api_response=? WHERE id=?",
+                     (result.get("ref",""), str(result.get("response",{})), wid))
+        conn.commit(); conn.close()
+
+        await context.bot.edit_message_text(
+            f"✅ <b>Airtime Sent Successfully!</b>\n\n"
+            f"📱 Phone: <b>{phone}</b>\n"
+            f"📡 Network: <b>{network}</b>\n"
+            f"💵 Amount: <b>₦{naira:.0f}</b>\n"
+            f"🔵 Points deducted: <b>{pts}</b>\n\n"
+            f"Your airtime should arrive within seconds!",
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
+            parse_mode="HTML"
+        )
+    else:
+        # API failed — mark pending, refund is NOT automatic (admin reviews)
+        conn.execute("UPDATE withdrawals SET status='pending', api_ref=?, api_response=? WHERE id=?",
+                     (result.get("ref",""), str(result.get("response",{})), wid))
+        conn.commit(); conn.close()
+
+        await context.bot.edit_message_text(
+            f"⏳ <b>Withdrawal Pending</b>\n\n"
+            f"📱 Phone: <b>{phone}</b>\n"
+            f"📡 Network: <b>{network}</b>\n"
+            f"💵 Amount: <b>₦{naira:.0f}</b>\n"
+            f"🔵 Points deducted: <b>{pts}</b>\n\n"
+            f"⚠️ Auto-processing failed. Your request has been sent to admin for manual processing.\n"
+            f"You will be notified once it's done.",
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
+            parse_mode="HTML"
+        )
+
+        # Notify admin with details
+        try:
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"💸 <b>Withdrawal #{wid} Needs Attention</b>\n\n"
+                f"👤 User: {uid} (@{u['username'] or 'N/A'}) — {u['first_name']}\n"
+                f"📱 Phone: {phone}\n"
+                f"📡 Network: {network}\n"
+                f"💵 Amount: ₦{naira:.0f}\n"
+                f"🔵 Points: {pts}\n\n"
+                f"❌ API Error: {result['message']}\n\n"
+                f"Use /approvepayment {wid} or /rejectpayment {wid}",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+    return ConversationHandler.END
+
+# ── Admin Payment Commands ────────────────────────────────────
+async def cmd_approvepayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID and not is_admin(update.effective_user.id):
+        await update.message.reply_text("🚫 Admin only."); return
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /approvepayment [withdrawal_id]"); return
+    wid  = int(args[0])
+    conn = get_conn()
+    w    = conn.execute("SELECT * FROM withdrawals WHERE id=?", (wid,)).fetchone()
+    if not w:
+        conn.close()
+        await update.message.reply_text("❌ Withdrawal not found."); return
+    conn.execute("UPDATE withdrawals SET status='paid' WHERE id=?", (wid,))
+    conn.commit(); conn.close()
+    await update.message.reply_text(f"✅ Withdrawal #{wid} marked as paid.")
+    try:
+        await context.bot.send_message(
+            w["user_id"],
+            f"✅ <b>Payment Confirmed!</b>\n\n"
+            f"Your ₦{w['amount_naira']:.0f} airtime to {w['phone']} ({w['network']}) has been sent!",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+async def cmd_rejectpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID and not is_admin(update.effective_user.id):
+        await update.message.reply_text("🚫 Admin only."); return
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /rejectpayment [withdrawal_id]"); return
+    wid  = int(args[0])
+    conn = get_conn()
+    w    = conn.execute("SELECT * FROM withdrawals WHERE id=? AND status='pending'", (wid,)).fetchone()
+    if not w:
+        conn.close()
+        await update.message.reply_text("❌ Withdrawal not found or not pending."); return
+    conn.execute("UPDATE withdrawals SET status='rejected' WHERE id=?", (wid,))
+    conn.commit(); conn.close()
+    # Refund points
+    add_points(w["user_id"], w["points"], f"Refund: Rejected withdrawal #{wid}", "refund")
+    await update.message.reply_text(f"❌ Withdrawal #{wid} rejected. {w['points']} pts refunded to user.")
+    try:
+        await context.bot.send_message(
+
+# ============================================================
+# CELL 8 - ADMIN PANEL
+# ============================================================
+
+def admin_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        uid = update.effective_user.id
+        if uid != ADMIN_ID and not is_admin(uid):
+            if update.message:
+                await update.message.reply_text("🚫 Admin only.")
+            return ConversationHandler.END
+        return await func(update, context)
+    wrapper.__name__ = func.__name__
+    return wrapper
+
+@admin_only
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn        = get_conn()
+    total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    total_pts   = conn.execute("SELECT COALESCE(SUM(points),0) FROM transactions WHERE type='earn'").fetchone()[0]
+    total_w     = conn.execute("SELECT COUNT(*) FROM withdrawals").fetchone()[0]
+    pending_w   = conn.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'").fetchone()[0]
+    conn.close()
+
+    # Check Databoom wallet balance
+    wallet_bal = await databoom_check_balance()
+
+    await update.message.reply_text(
+        f"🛠️ <b>Admin Dashboard</b>\n\n"
+        f"👥 Total Users: <b>{total_users}</b>\n"
+        f"🔵 Points Distributed: <b>{total_pts}</b>\n"
+        f"💸 Total Withdrawals: <b>{total_w}</b>\n"
+        f"⏳ Pending: <b>{pending_w}</b>\n"
+        f"💳 Databoom Wallet: <b>₦{wallet_bal}</b>\n\n"
+        f"<b>Task Commands:</b>\n"
+        f"/addtask | /removetask [id] | /activatetask [id] | /deactivatetask [id]\n\n"
+        f"<b>User Commands:</b>\n"
+        f"/searchuser [id] | /addpoints [id] [pts] | /removepoints [id] [pts]\n"
+        f"/banuser [id] | /unbanuser [id]\n\n"
+        f"<b>Withdrawal Commands:</b>\n"
+        f"/withdrawals | /approvepayment [id] | /rejectpayment [id]\n\n"
+        f"<b>Broadcast:</b>\n"
+        f"/broadcast\n\n"
+        f"<b>Settings:</b>\n"
+        f"/setreferralreward [pts] | /setconversion [pts] [₦]\n"
+        f"/setdailylimit [₦] | /setwelcome [msg]",
+        parse_mode="HTML"
+    )
+
+@admin_only
+async def cmd_addtask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📋 <b>Add Task</b>\n\nEnter task title:", parse_mode="HTML")
+    return AWAIT_TASK_TITLE
+
+async def addtask_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["newtask"] = {"title": update.message.text.strip()}
+    await update.message.reply_text("📝 Enter task description:")
+    return AWAIT_TASK_DESC
+
+async def addtask_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["newtask"]["description"] = update.message.text.strip()
+    await update.message.reply_text("🔗 Enter task link (or send 'none'):")
+    return AWAIT_TASK_LINK
+
+async def addtask_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = update.message.text.strip()
+    context.user_data["newtask"]["link"] = "" if txt.lower() == "none" else txt
+    await update.message.reply_text("🎁 Enter reward points:")
+    return AWAIT_TASK_REWARD
+
+async def addtask_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.text.strip().isdigit():
+        await update.message.reply_text("❌ Enter a valid number:"); return AWAIT_TASK_REWARD
+    context.user_data["newtask"]["reward"] = int(update.message.text.strip())
+    await update.message.reply_text("📌 Select task type:", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("Telegram Join",  callback_data="ttype_telegram_join"),
+         InlineKeyboardButton("Twitter Follow", callback_data="ttype_twitter_follow")],
+        [InlineKeyboardButton("Twitter Like",   callback_data="ttype_twitter_like"),
+         InlineKeyboardButton("Twitter Repost", callback_data="ttype_twitter_repost")],
+        [InlineKeyboardButton("Website Visit",  callback_data="ttype_website_visit"),
+         InlineKeyboardButton("Custom",         callback_data="ttype_custom")],
+    ]))
+    return AWAIT_TASK_TYPE
+
+async def addtask_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    task_type = query.data.replace("ttype_", "")
+    nt = context.user_data["newtask"]
+    conn = get_conn()
+    conn.execute("INSERT INTO tasks (title,description,link,reward,task_type) VALUES (?,?,?,?,?)",
+                 (nt["title"], nt["description"], nt["link"], nt["reward"], task_type))
+    conn.commit(); conn.close()
+    await query.edit_message_text(
+        f"✅ <b>Task Added!</b>\n\n📋 {nt['title']}\n🎁 {nt['reward']} pts\n📌 {task_type}",
+        parse_mode="HTML"
+    )
+    return ConversationHandler.END
+
+@admin_only
+async def cmd_removetask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        conn  = get_conn()
+        tasks = conn.execute("SELECT * FROM tasks").fetchall()
+        conn.close()
+        lines = ["📋 <b>All Tasks</b> (use /removetask [id])\n"]
+        for t in tasks:
+            lines.append(f"ID {t['task_id']}: {t['title']} ({'✅' if t['is_active'] else '❌'})")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML"); return
+    conn = get_conn()
+    conn.execute("DELETE FROM tasks WHERE task_id=?", (int(args[0]),))
+    conn.commit(); conn.close()
+    await update.message.reply_text(f"✅ Task {args[0]} removed.")
+
+@admin_only
+async def cmd_activatetask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /activatetask [task_id]"); return
+    conn = get_conn()
+    conn.execute("UPDATE tasks SET is_active=1 WHERE task_id=?", (int(args[0]),))
+    conn.commit(); conn.close()
+    await update.message.reply_text(f"✅ Task {args[0]} activated.")
+
+@admin_only
+async def cmd_deactivatetask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /deactivatetask [task_id]"); return
+    conn = get_conn()
+    conn.execute("UPDATE tasks SET is_active=0 WHERE task_id=?", (int(args[0]),))
+    conn.commit(); conn.close()
+    await update.message.reply_text(f"✅ Task {args[0]} deactivated.")
+
+@admin_only
+async def cmd_searchuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /searchuser [user_id or username]"); return
+    q = args[0].replace("@","")
+    conn = get_conn()
+    u = conn.execute("SELECT * FROM users WHERE user_id=?", (int(q),)).fetchone() if q.isdigit() \
+        else conn.execute("SELECT * FROM users WHERE username=?", (q,)).fetchone()
+    conn.close()
+    if not u:
+        await update.message.reply_text("❌ User not found."); return
+    ref_count = get_referral_count(u["user_id"])
+    await update.message.reply_text(
+        f"👤 <b>User Info</b>\n\n"
+        f"🆔 ID: <code>{u['user_id']}</code>\n"
+        f"👤 @{u['username'] or 'N/A'} — {u['first_name']}\n"
+        f"💰 Points: <b>{u['points']}</b>\n"
+        f"👥 Referrals: <b>{ref_count}</b>\n"
+        f"📈 Earned: {u['total_earned']} | Withdrawn: {u['total_withdrawn']}\n"
+        f"✅ Onboarding: {'Done' if u['onboarding_complete'] else 'Pending'}\n"
+        f"🚫 Banned: {'Yes' if u['is_banned'] else 'No'}\n"
+        f"📅 Joined: {u['join_date'][:10] if u['join_date'] else 'N/A'}",
+        parse_mode="HTML"
+    )
+
+@admin_only
+async def cmd_addpoints(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
+        await update.message.reply_text("Usage: /addpoints [user_id] [points]"); return
+    uid, pts = int(args[0]), int(args[1])
+    if not get_user(uid):
+        await update.message.reply_text("❌ User not found."); return
+    add_points(uid, pts, "Admin added points", "admin_add")
+    await update.message.reply_text(f"✅ Added {pts} pts to user {uid}.")
+    try:
+        await context.bot.send_message(uid, f"🎁 Admin added <b>{pts} points</b> to your account!", parse_mode="HTML")
+    except Exception: pass
+
+@admin_only
+async def cmd_removepoints(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
+        await update.message.reply_text("Usage: /removepoints [user_id] [points]"); return
+    uid, pts = int(args[0]), int(args[1])
+    if not get_user(uid):
+        await update.message.reply_text("❌ User not found."); return
+    deduct_points(uid, pts, "Admin removed points", "admin_remove")
+    await update.message.reply_text(f"✅ Removed {pts} pts from user {uid}.")
+
+@admin_only
+async def cmd_banuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /banuser [user_id]"); return
+    uid = int(args[0])
+    conn = get_conn()
+    conn.execute("UPDATE users SET is_banned=1 WHERE user_id=?", (uid,))
+    conn.commit(); conn.close()
+    await update.message.reply_text(f"🚫 User {uid} banned.")
+
+@admin_only
+async def cmd_unbanuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /unbanuser [user_id]"); return
+    uid = int(args[0])
+    conn = get_conn()
+    conn.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (uid,))
+    conn.commit(); conn.close()
+    await update.message.reply_text(f"✅ User {uid} unbanned.")
+
+@admin_only
+async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📢 <b>Broadcast</b>\n\nSelect type:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 Text",     callback_data="bc_text"),
+             InlineKeyboardButton("🖼 Photo",    callback_data="bc_photo")],
+            [InlineKeyboardButton("🎥 Video",    callback_data="bc_video"),
+             InlineKeyboardButton("📄 Document", callback_data="bc_document")],
+            [InlineKeyboardButton("❌ Cancel",   callback_data="bc_cancel")],
+        ]),
+        parse_mode="HTML"
+    )
+    return AWAIT_BROADCAST_TYPE
+
+async def broadcast_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "bc_cancel":
+        await query.edit_message_text("❌ Broadcast cancelled.")
+        return ConversationHandler.END
+    bc_type = query.data.replace("bc_","")
+    context.user_data["bc_type"] = bc_type
+    prompts = {
+        "text": "Send the text message to broadcast:",
+        "photo": "Send the photo to broadcast:",
+        "video": "Send the video to broadcast:",
+        "document": "Send the document to broadcast:"
+    }
+    await query.edit_message_text(prompts.get(bc_type, "Send content:"))
+    return AWAIT_BROADCAST_CONTENT
+
+async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bc_type = context.user_data.get("bc_type","text")
+    conn    = get_conn()
+    users   = conn.execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
+    conn.close()
+    sent = failed = 0
+    for row in users:
+        uid = row["user_id"]
+        try:
+            if bc_type == "text":
+                await context.bot.send_message(uid, update.message.text, parse_mode="HTML")
+            elif bc_type == "photo" and update.message.photo:
+                await context.bot.send_photo(uid, update.message.photo[-1].file_id,
+                                              caption=update.message.caption or "")
+            elif bc_type == "video" and update.message.video:
+                await context.bot.send_video(uid, update.message.video.file_id,
+                                              caption=update.message.caption or "")
+            elif bc_type == "document" and update.message.document:
+                await context.bot.send_document(uid, update.message.document.file_id,
+                                                 caption=update.message.caption or "")
+            sent += 1
+        except Exception:
+            failed += 1
+    await update.message.reply_text(f"📢 Broadcast done!\n✅ Sent: {sent}\n❌ Failed: {failed}")
+    return ConversationHandler.END
+
+@admin_only
+async def cmd_setreferralreward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /setreferralreward [points]"); return
+    set_setting("referral_reward", args[0])
+    await update.message.reply_text(f"✅ Referral reward set to {args[0]} pts.")
+
+@admin_only
+async def cmd_setconversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
+        await update.message.reply_text("Usage: /setconversion [points] [naira]"); return
+    set_setting("point_conversion_points", args[0])
+    set_setting("point_conversion_naira", args[1])
+    await update.message.reply_text(f"✅ Conversion: {args[0]} pts = ₦{args[1]}")
+
+@admin_only
+async def cmd_setdailylimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /setdailylimit [naira]"); return
+    set_setting("daily_limit_naira", args[0])
+    await update.message.reply_text(f"✅ Daily limit set to ₦{args[0]}")
+
+@admin_only
+async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /setwelcome [message]"); return
+    set_setting("welcome_message", " ".join(args))
+    await update.message.reply_text("✅ Welcome message updated.")
+
+print("✅ Admin panel loaded!")
+
+# ============================================================
+# CELL 9 - RUN THE BOT
+# ============================================================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Update caused error: {context.error}", exc_info=context.error)
+
+def build_app():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # ── Withdrawal Conversation ────────────────────────────────
+    withdraw_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_withdraw, pattern="^withdraw$")],
+        states={
+            AWAIT_PHONE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_phone)],
+            AWAIT_NETWORK: [CallbackQueryHandler(withdraw_network, pattern="^net_")],
+            AWAIT_CONFIRM: [CallbackQueryHandler(withdraw_confirm, pattern="^withdraw_confirm$")],
+        },
+        fallbacks=[CallbackQueryHandler(cb_home, pattern="^home$")],
+        per_message=False,
+    )
+
+    # ── Broadcast Conversation ─────────────────────────────────
+    broadcast_conv = ConversationHandler(
+        entry_points=[CommandHandler("broadcast", cmd_broadcast)],
+        states={
+            AWAIT_BROADCAST_TYPE: [CallbackQueryHandler(broadcast_type, pattern="^bc_")],
+            AWAIT_BROADCAST_CONTENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_send),
+                MessageHandler(filters.PHOTO, broadcast_send),
+                MessageHandler(filters.VIDEO, broadcast_send),
+                MessageHandler(filters.Document.ALL, broadcast_send),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+        per_message=False,
+    )
+
+    # ── Add Task Conversation ──────────────────────────────────
+    addtask_conv = ConversationHandler(
+        entry_points=[CommandHandler("addtask", cmd_addtask)],
+        states={
+            AWAIT_TASK_TITLE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_title)],
+            AWAIT_TASK_DESC:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_desc)],
+            AWAIT_TASK_LINK:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_link)],
+            AWAIT_TASK_REWARD: [MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_reward)],
+            AWAIT_TASK_TYPE:   [CallbackQueryHandler(addtask_type, pattern="^ttype_")],
+        },
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+        per_message=False,
+    )
+
+    # ── Register Handlers ──────────────────────────────────────
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("removetask", cmd_removetask))
+    app.add_handler(CommandHandler("activatetask", cmd_activatetask))
+    app.add_handler(CommandHandler("deactivatetask", cmd_deactivatetask))
+    app.add_handler(CommandHandler("searchuser", cmd_searchuser))
+    app.add_handler(CommandHandler("addpoints", cmd_addpoints))
+    app.add_handler(CommandHandler("removepoints", cmd_removepoints))
+    app.add_handler(CommandHandler("banuser", cmd_banuser))
+    app.add_handler(CommandHandler("unbanuser", cmd_unbanuser))
+    app.add_handler(CommandHandler("withdrawals", cmd_withdrawals))
+    app.add_handler(CommandHandler("approvepayment", cmd_approvepayment))
+    app.add_handler(CommandHandler("rejectpayment", cmd_rejectpayment))
+    app.add_handler(CommandHandler("setreferralreward", cmd_setreferralreward))
+    app.add_handler(CommandHandler("setconversion", cmd_setconversion))
+    app.add_handler(CommandHandler("setdailylimit", cmd_setdailylimit))
+    app.add_handler(CommandHandler("setwelcome", cmd_setwelcome))
+
+    # Conversations (before generic callbacks)
+    app.add_handler(withdraw_conv)
+    app.add_handler(broadcast_conv)
+    app.add_handler(addtask_conv)
+
+    # Onboarding callbacks
+    app.add_handler(CallbackQueryHandler(cb_verify_channel, pattern="^verify_channel$"))
+    app.add_handler(CallbackQueryHandler(cb_open_twitter,   pattern="^open_twitter$"))
+    app.add_handler(CallbackQueryHandler(cb_verify_twitter, pattern="^verify_twitter$"))
+
+    # Home menu callbacks
+    app.add_handler(CallbackQueryHandler(cb_home,        pattern="^home$"))
+    app.add_handler(CallbackQueryHandler(cb_balance,     pattern="^bal$"))
+    app.add_handler(CallbackQueryHandler(cb_referrals,   pattern="^referrals$"))
+    app.add_handler(CallbackQueryHandler(cb_tasks,       pattern="^tasks$"))
+    app.add_handler(CallbackQueryHandler(cb_profile,     pattern="^profile$"))
+    app.add_handler(CallbackQueryHandler(cb_leaderboard, pattern="^leaderboard$"))
+    app.add_handler(CallbackQueryHandler(cb_help,        pattern="^help$"))
+
+    # Task callbacks
+    app.add_handler(CallbackQueryHandler(cb_task_detail, pattern=r"^task_\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_task_open,   pattern=r"^taskopen_\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_task_done,   pattern=r"^taskdone_\d+$"))
+
+    app.add_error_handler(error_handler)
+    return app
+
+# ── Launch ────────────────────────────────────────────────────
+nest_asyncio.apply()
+print("🚀 Starting Nexarion Rewards Bot...")
+print(f"📡 Using Databoom Nigeria API")
+print(f"💳 API URL: {DATABOOM_URL}/airtime")
+app = build_app()
+app.run_polling(drop_pending_updates=True)
