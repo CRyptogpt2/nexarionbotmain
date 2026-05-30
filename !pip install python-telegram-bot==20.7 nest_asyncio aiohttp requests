@@ -1,33 +1,31 @@
-
 # ============================================================
 # CELL 1 - INSTALL DEPENDENCIES
-# Run this cell first, then restart runtime if prompted
+# Run this cell first!
 # ============================================================
-
 import subprocess
-subprocess.run(["pip", "install",
+subprocess.run([
+    "pip", "install",
     "python-telegram-bot==20.7",
     "nest_asyncio",
     "aiohttp",
     "requests"
 ], check=True)
+print("✅ All dependencies installed!")
 
-print("✅ All dependencies installed successfully!")
 # ============================================================
 # CELL 2 - IMPORTS & CONFIGURATION
 # ============================================================
-
 import sqlite3
 import asyncio
 import logging
 import aiohttp
 import requests
 import nest_asyncio
+import time
 import random
-import string
 from datetime import datetime, date
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -36,16 +34,24 @@ from telegram.ext import (
 from telegram.error import TelegramError
 
 # ── Bot Credentials ──────────────────────────────────────────
-BOT_TOKEN      = "8863743336:AAG-RBA0fJEtvSBzT9zznMgL7WeuKDDg764"
-ADMIN_ID       = 6326301165
-CHANNEL_UN     = "@nexarion11news"
-CHANNEL_LINK   = "https://t.me/nexarion11news"
-TWITTER_LINK   = "https://x.com/Nexarion11"
-BOT_USERNAME   = "Nexafreeairtimebot"
+BOT_TOKEN    = "8863743336:AAG-RBA0fJEtvSBzT9zznMgL7WeuKDDg764"
+ADMIN_ID     = 6326301165
+CHANNEL_UN   = "@nexarion11news"
+CHANNEL_LINK = "https://t.me/nexarion11news"
+TWITTER_LINK = "https://x.com/Nexarion11"
+BOT_USERNAME = "Nexafreeairtimebot"
 
-# ── Gsubz Airtime API ────────────────────────────────────────
-GSUBZ_API_KEY  = "ap_d4fb558fd4919e9baa343fab89b1804c"
-GSUBZ_BASE_URL = "https://www.gsubz.com/api"
+# ── Databoom Nigeria API ──────────────────────────────────────
+DATABOOM_TOKEN   = "zgVcmvDGZGWbnjDyDqfP3xJqibjpdeG7pVYHdWZJizsmQ1pCYU8KTfn7vY7VMbdUYm4gDF"
+DATABOOM_URL     = "https://databoomnigeria.ng/api"
+DATABOOM_HEADERS = {
+    "Authorization": f"Token {DATABOOM_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+# Network ID map from Databoom (MTN=1, Airtel=2, Glo=3, 9mobile=4)
+# These are fetched dynamically but kept as fallback defaults
+NETWORK_IDS = {"MTN": 1, "Airtel": 2, "Glo": 3, "9mobile": 4}
 
 # ── Conversation States ───────────────────────────────────────
 (
@@ -53,24 +59,18 @@ GSUBZ_BASE_URL = "https://www.gsubz.com/api"
     AWAIT_BROADCAST_TYPE, AWAIT_BROADCAST_CONTENT,
     AWAIT_TASK_TITLE, AWAIT_TASK_DESC, AWAIT_TASK_LINK,
     AWAIT_TASK_REWARD, AWAIT_TASK_TYPE,
-    AWAIT_EDIT_FIELD, AWAIT_EDIT_VALUE,
-    AWAIT_ADMIN_POINTS_ID, AWAIT_ADMIN_POINTS_AMT,
-    AWAIT_REMOVE_POINTS_ID, AWAIT_REMOVE_POINTS_AMT,
-    AWAIT_BAN_ID, AWAIT_UNBAN_ID, AWAIT_SEARCH_USER,
-) = range(19)
+) = range(10)
 
-# ── Logging ───────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+print("✅ Config loaded!")
 
-print("✅ Imports and config loaded!")
 # ============================================================
 # CELL 3 - DATABASE SETUP
 # ============================================================
-
 DB_PATH = "nexarion.db"
 
 def get_conn():
@@ -81,7 +81,6 @@ def get_conn():
 def init_db():
     conn = get_conn()
     c = conn.cursor()
-
     c.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             user_id             INTEGER PRIMARY KEY,
@@ -99,7 +98,6 @@ def init_db():
             is_banned           INTEGER DEFAULT 0,
             join_date           TEXT
         );
-
         CREATE TABLE IF NOT EXISTS tasks (
             task_id     INTEGER PRIMARY KEY AUTOINCREMENT,
             title       TEXT,
@@ -109,7 +107,6 @@ def init_db():
             task_type   TEXT,
             is_active   INTEGER DEFAULT 1
         );
-
         CREATE TABLE IF NOT EXISTS completed_tasks (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id      INTEGER,
@@ -117,7 +114,6 @@ def init_db():
             completed_at TEXT,
             UNIQUE(user_id, task_id)
         );
-
         CREATE TABLE IF NOT EXISTS referrals (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             referrer_id INTEGER,
@@ -125,18 +121,19 @@ def init_db():
             rewarded    INTEGER DEFAULT 0,
             created_at  TEXT
         );
-
         CREATE TABLE IF NOT EXISTS withdrawals (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id      INTEGER,
             phone        TEXT,
             network      TEXT,
+            network_id   INTEGER,
             points       INTEGER,
             amount_naira REAL,
             status       TEXT DEFAULT 'pending',
+            api_ref      TEXT,
+            api_response TEXT,
             created_at   TEXT
         );
-
         CREATE TABLE IF NOT EXISTS transactions (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id     INTEGER,
@@ -145,18 +142,15 @@ def init_db():
             description TEXT,
             created_at  TEXT
         );
-
         CREATE TABLE IF NOT EXISTS settings (
             key   TEXT PRIMARY KEY,
             value TEXT
         );
-
         CREATE TABLE IF NOT EXISTS admins (
             user_id INTEGER PRIMARY KEY
         );
     """)
 
-    # Default settings
     defaults = {
         "point_conversion_points": "1000",
         "point_conversion_naira":  "300",
@@ -165,113 +159,106 @@ def init_db():
         "referral_reward":         "70",
         "channel_reward":          "50",
         "twitter_reward":          "50",
-        "welcome_message":         (
+        "welcome_message": (
             "🎉 Welcome to <b>Nexarion Rewards Bot</b>!\n\n"
             "Complete tasks, invite friends, earn points, and redeem airtime.\n\n"
             "To continue, please join our Telegram channel 👇"
         ),
     }
     for k, v in defaults.items():
-        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+        c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (k, v))
 
-    # Ensure main admin is always in admins table
     c.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (ADMIN_ID,))
-
     conn.commit()
     conn.close()
-    print("✅ Database initialized!")
+    print("✅ Database ready!")
 
-# ── Helper DB Functions ───────────────────────────────────────
-
+# ── DB Helpers ────────────────────────────────────────────────
 def get_setting(key):
     conn = get_conn()
-    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    r = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     conn.close()
-    return row["value"] if row else None
+    return r["value"] if r else None
 
 def set_setting(key, value):
     conn = get_conn()
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, str(value)))
-    conn.commit()
-    conn.close()
+    conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (key, str(value)))
+    conn.commit(); conn.close()
 
 def get_user(user_id):
     conn = get_conn()
-    row = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+    r = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
-    return dict(row) if row else None
+    return dict(r) if r else None
 
 def register_user(user_id, username, first_name, referred_by=None):
-    code = "NEX" + str(user_id)
+    code = f"NEX{user_id}"
     conn = get_conn()
     conn.execute("""
         INSERT OR IGNORE INTO users
-        (user_id, username, first_name, referral_code, referred_by, join_date)
+        (user_id,username,first_name,referral_code,referred_by,join_date)
         VALUES (?,?,?,?,?,?)
     """, (user_id, username or "", first_name or "User", code, referred_by, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
-def add_points(user_id, points, description, tx_type="earn"):
+def add_points(user_id, pts, description, tx_type="earn"):
     conn = get_conn()
-    conn.execute("UPDATE users SET points = points + ?, total_earned = total_earned + ? WHERE user_id=?",
-                 (points, points, user_id))
-    conn.execute("INSERT INTO transactions (user_id, type, points, description, created_at) VALUES (?,?,?,?,?)",
-                 (user_id, tx_type, points, description, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    conn.execute("UPDATE users SET points=points+?, total_earned=total_earned+? WHERE user_id=?",
+                 (pts, pts, user_id))
+    conn.execute("INSERT INTO transactions (user_id,type,points,description,created_at) VALUES (?,?,?,?,?)",
+                 (user_id, tx_type, pts, description, datetime.now().isoformat()))
+    conn.commit(); conn.close()
 
-def deduct_points(user_id, points, description, tx_type="withdraw"):
+def deduct_points(user_id, pts, description, tx_type="withdraw"):
     conn = get_conn()
-    conn.execute("UPDATE users SET points = points - ?, total_withdrawn = total_withdrawn + ? WHERE user_id=?",
-                 (points, points, user_id))
-    conn.execute("INSERT INTO transactions (user_id, type, points, description, created_at) VALUES (?,?,?,?,?)",
-                 (user_id, tx_type, points, description, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    conn.execute("UPDATE users SET points=points-?, total_withdrawn=total_withdrawn+? WHERE user_id=?",
+                 (pts, pts, user_id))
+    conn.execute("INSERT INTO transactions (user_id,type,points,description,created_at) VALUES (?,?,?,?,?)",
+                 (user_id, tx_type, pts, description, datetime.now().isoformat()))
+    conn.commit(); conn.close()
 
 def get_referral_count(user_id):
     conn = get_conn()
-    row = conn.execute("SELECT COUNT(*) as cnt FROM referrals WHERE referrer_id=?", (user_id,)).fetchone()
+    r = conn.execute("SELECT COUNT(*) as c FROM referrals WHERE referrer_id=?", (user_id,)).fetchone()
     conn.close()
-    return row["cnt"] if row else 0
+    return r["c"] if r else 0
 
 def get_referral_earnings(user_id):
     conn = get_conn()
-    row = conn.execute(
-        "SELECT COALESCE(SUM(points),0) as total FROM transactions WHERE user_id=? AND description LIKE '%Referral%'",
+    r = conn.execute(
+        "SELECT COALESCE(SUM(points),0) as t FROM transactions WHERE user_id=? AND description LIKE '%Referral%'",
         (user_id,)
     ).fetchone()
     conn.close()
-    return row["total"] if row else 0
+    return r["t"] if r else 0
 
 def is_admin(user_id):
     conn = get_conn()
-    row = conn.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,)).fetchone()
+    r = conn.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
-    return row is not None
+    return r is not None
 
 def get_daily_withdrawn(user_id):
     today = date.today().isoformat()
     conn = get_conn()
-    row = conn.execute("""
-        SELECT COALESCE(SUM(amount_naira),0) as total FROM withdrawals
+    r = conn.execute("""
+        SELECT COALESCE(SUM(amount_naira),0) as t FROM withdrawals
         WHERE user_id=? AND status IN ('pending','approved','paid') AND created_at LIKE ?
     """, (user_id, today + "%")).fetchone()
     conn.close()
-    return row["total"] if row else 0
+    return r["t"] if r else 0
 
 def task_completed(user_id, task_id):
     conn = get_conn()
-    row = conn.execute("SELECT 1 FROM completed_tasks WHERE user_id=? AND task_id=?",
-                       (user_id, task_id)).fetchone()
+    r = conn.execute("SELECT 1 FROM completed_tasks WHERE user_id=? AND task_id=?",
+                     (user_id, task_id)).fetchone()
     conn.close()
-    return row is not None
+    return r is not None
 
 def mark_task_done(user_id, task_id):
     conn = get_conn()
     try:
-        conn.execute("INSERT INTO completed_tasks (user_id, task_id, completed_at) VALUES (?,?,?)",
+        conn.execute("INSERT INTO completed_tasks (user_id,task_id,completed_at) VALUES (?,?,?)",
                      (user_id, task_id, datetime.now().isoformat()))
         conn.commit()
         return True
@@ -281,19 +268,110 @@ def mark_task_done(user_id, task_id):
         conn.close()
 
 init_db()
+
 # ============================================================
-# CELL 4 - ONBOARDING FLOW & MENUS
+# CELL 4 - DATABOOM API FUNCTIONS
+# ============================================================
+
+async def databoom_get_network_id(network_name: str) -> int:
+    """Fetch real network ID from Databoom API."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{DATABOOM_URL}/network-details",
+                headers=DATABOOM_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                data = await resp.json(content_type=None)
+                if data.get("status") == "success":
+                    for net in data.get("data", []):
+                        if net["network"].upper() == network_name.upper():
+                            return net["nId"]
+    except Exception as e:
+        logger.error(f"Databoom network fetch error: {e}")
+    # Return fallback IDs if API fails
+    return NETWORK_IDS.get(network_name, 1)
+
+async def databoom_buy_airtime(phone: str, network_name: str, amount: float, wid: int) -> dict:
+    """
+    Buy airtime using Databoom Nigeria API.
+    Returns dict with keys: success (bool), message (str), response (dict)
+    """
+    try:
+        # Get network ID
+        network_id = await databoom_get_network_id(network_name)
+
+        # Generate unique ref
+        ref = f"NEX{wid}_{int(time.time())}_{random.randint(100,999)}"
+
+        payload = {
+            "network":      network_id,
+            "phone":        phone,
+            "amount":       int(amount),
+            "airtime_type": "VTU",
+            "ported_number": "false",
+            "ref":           ref
+        }
+
+        logger.info(f"Databoom airtime request #{wid}: {payload}")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{DATABOOM_URL}/airtime",
+                headers=DATABOOM_HEADERS,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                data = await resp.json(content_type=None)
+                logger.info(f"Databoom airtime response #{wid}: {data}")
+
+                success = (
+                    str(data.get("status", "")).lower() == "success" or
+                    str(data.get("Status", "")).lower() in ("success", "successful")
+                )
+                msg = data.get("msg", str(data))
+                return {"success": success, "message": msg, "response": data, "ref": ref}
+
+    except aiohttp.ClientConnectorError:
+        return {"success": False, "message": "Network error - could not reach payment provider", "response": {}}
+    except asyncio.TimeoutError:
+        return {"success": False, "message": "Request timed out - please check with admin", "response": {}}
+    except Exception as e:
+        logger.error(f"Databoom airtime error #{wid}: {e}")
+        return {"success": False, "message": str(e), "response": {}}
+
+async def databoom_check_balance() -> str:
+    """Check Databoom wallet balance."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{DATABOOM_URL}/user",
+                headers=DATABOOM_HEADERS,
+                json={},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                data = await resp.json(content_type=None)
+                if data.get("status") == "success":
+                    return data["data"].get("balance", "N/A")
+    except Exception as e:
+        logger.error(f"Balance check error: {e}")
+    return "N/A"
+
+print("✅ Databoom API functions loaded!")
+
+# ============================================================
+# CELL 5 - ONBOARDING FLOW
 # ============================================================
 
 def home_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 Balance", callback_data="bal"),
-         InlineKeyboardButton("👥 Referrals", callback_data="referrals")],
-        [InlineKeyboardButton("📋 Tasks", callback_data="tasks"),
-         InlineKeyboardButton("💸 Withdraw", callback_data="withdraw")],
-        [InlineKeyboardButton("👤 Profile", callback_data="profile"),
+        [InlineKeyboardButton("💰 Balance",     callback_data="bal"),
+         InlineKeyboardButton("👥 Referrals",   callback_data="referrals")],
+        [InlineKeyboardButton("📋 Tasks",       callback_data="tasks"),
+         InlineKeyboardButton("💸 Withdraw",    callback_data="withdraw")],
+        [InlineKeyboardButton("👤 Profile",     callback_data="profile"),
          InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
-        [InlineKeyboardButton("❓ Help", callback_data="help")],
+        [InlineKeyboardButton("❓ Help",        callback_data="help")],
     ])
 
 async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE, user=None):
@@ -313,12 +391,24 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE, user=Non
     else:
         await update.message.reply_text(text, reply_markup=home_keyboard(), parse_mode="HTML")
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user   = update.effective_user
-    uid    = user.id
-    args   = context.args
+async def show_home_from_query(query, context):
+    uid  = query.from_user.id
+    user = get_user(uid)
+    ref_count = get_referral_count(uid)
+    text = (
+        f"🏠 <b>Nexarion Rewards Bot</b>\n\n"
+        f"👋 Welcome back, <b>{user['first_name']}</b>!\n"
+        f"💰 Points: <b>{user['points']}</b>\n"
+        f"👥 Referrals: <b>{ref_count}</b>\n\n"
+        f"What would you like to do?"
+    )
+    await query.edit_message_text(text, reply_markup=home_keyboard(), parse_mode="HTML")
 
-    # Parse referral code
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user  = update.effective_user
+    uid   = user.id
+    args  = context.args
+
     referred_by = None
     if args:
         code = args[0]
@@ -333,14 +423,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if referred_by:
             conn = get_conn()
             conn.execute(
-                "INSERT OR IGNORE INTO referrals (referrer_id, referred_id, created_at) VALUES (?,?,?)",
+                "INSERT OR IGNORE INTO referrals (referrer_id,referred_id,created_at) VALUES (?,?,?)",
                 (referred_by, uid, datetime.now().isoformat())
             )
-            conn.commit()
-            conn.close()
+            conn.commit(); conn.close()
 
     u = get_user(uid)
-
     if u["is_banned"]:
         await update.message.reply_text("🚫 You have been banned from this bot.")
         return
@@ -349,7 +437,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_home(update, context, user=u)
         return
 
-    # Show welcome / onboarding
     welcome = get_setting("welcome_message")
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 Join Channel", url=CHANNEL_LINK)],
@@ -368,7 +455,6 @@ async def cb_verify_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if u["channel_joined"]:
-        # Already verified, move to Twitter step
         await show_twitter_step(query)
         return
 
@@ -379,11 +465,10 @@ async def cb_verify_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             add_points(uid, reward, "Channel Join Reward")
             conn = get_conn()
             conn.execute("UPDATE users SET channel_joined=1 WHERE user_id=?", (uid,))
-            conn.commit()
-            conn.close()
+            conn.commit(); conn.close()
             await query.edit_message_text(
                 f"✅ <b>Channel verified!</b>\n\n"
-                f"🎁 You've earned <b>{reward} points</b>!\n\n"
+                f"🎁 You earned <b>{reward} points</b>!\n\n"
                 f"Now follow us on X to earn more points 👇",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🐦 Follow on X", callback_data="open_twitter")],
@@ -399,7 +484,7 @@ async def cb_verify_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_twitter_step(query):
     await query.edit_message_text(
         "🐦 <b>Follow us on X (Twitter)</b>\n\n"
-        "Click the button below to follow, then click <b>Done</b>.",
+        "Click 'Follow on X' below, then tap ✅ Done.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🐦 Follow on X", callback_data="open_twitter")],
             [InlineKeyboardButton("✅ Done", callback_data="verify_twitter")],
@@ -409,17 +494,14 @@ async def show_twitter_step(query):
 
 async def cb_open_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    uid   = query.from_user.id
-    conn  = get_conn()
-    conn.execute("UPDATE users SET twitter_link_opened=1 WHERE user_id=?", (uid,))
-    conn.commit()
-    conn.close()
-    await query.answer("Twitter link opened! Come back and click Done.", show_alert=False)
     await query.answer()
-    # Send them the URL
+    uid = query.from_user.id
+    conn = get_conn()
+    conn.execute("UPDATE users SET twitter_link_opened=1 WHERE user_id=?", (uid,))
+    conn.commit(); conn.close()
     await context.bot.send_message(
         uid,
-        f"👉 Follow us here: {TWITTER_LINK}\n\nOnce done, tap ✅ Done in the previous message."
+        f"👉 Follow us here: {TWITTER_LINK}\n\nOnce done, tap ✅ Done in the message above."
     )
 
 async def cb_verify_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -440,10 +522,9 @@ async def cb_verify_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_points(uid, reward, "Twitter Follow Reward")
     conn = get_conn()
     conn.execute("UPDATE users SET twitter_followed=1, onboarding_complete=1 WHERE user_id=?", (uid,))
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
-    # Reward referrer if applicable
+    # Reward referrer
     conn = get_conn()
     ref_row = conn.execute(
         "SELECT * FROM referrals WHERE referred_id=? AND rewarded=0", (uid,)
@@ -454,959 +535,4 @@ async def cb_verify_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ref_reward = int(get_setting("referral_reward"))
         add_points(ref_row["referrer_id"], ref_reward, f"Referral Reward (user {uid})", "referral")
         conn = get_conn()
-        conn.execute("UPDATE referrals SET rewarded=1 WHERE id=?", (ref_row["id"],))
-        conn.commit()
-        conn.close()
-        try:
-            await context.bot.send_message(
-                ref_row["referrer_id"],
-                f"🎉 Your referral completed onboarding!\n+{ref_reward} points added to your account."
-            )
-        except Exception:
-            pass
-
-    u = get_user(uid)
-    await query.edit_message_text(
-        f"🎉 <b>Onboarding Complete!</b>\n\n"
-        f"🎁 You've earned <b>{reward} points</b> for following on X!\n\n"
-        f"You now have <b>{u['points']} points</b> total.\n"
-        f"Welcome to Nexarion Rewards! 🚀",
-        parse_mode="HTML"
-    )
-    await show_home(update, context, user=u)
-
-async def show_home_from_query(query, context):
-    uid  = query.from_user.id
-    user = get_user(uid)
-    ref_count = get_referral_count(uid)
-    text = (
-        f"🏠 <b>Nexarion Rewards Bot</b>\n\n"
-        f"👋 Welcome back, <b>{user['first_name']}</b>!\n"
-        f"💰 Points: <b>{user['points']}</b>\n"
-        f"👥 Referrals: <b>{ref_count}</b>\n\n"
-        f"What would you like to do?"
-    )
-    await query.edit_message_text(text, reply_markup=home_keyboard(), parse_mode="HTML")
-
-print("✅ Onboarding and menus loaded!")
-# ============================================================
-# CELL 5 - USER FEATURES (Balance, Referrals, Tasks, Profile, Leaderboard, Help)
-# ============================================================
-
-# ── Balance ───────────────────────────────────────────────────
-async def cb_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid  = query.from_user.id
-    u    = get_user(uid)
-    pts  = u["points"]
-    conv_pts   = int(get_setting("point_conversion_points"))
-    conv_naira = int(get_setting("point_conversion_naira"))
-    naira_val  = (pts / conv_pts) * conv_naira if pts >= conv_pts else 0
-
-    text = (
-        f"💰 <b>Your Balance</b>\n\n"
-        f"🔵 Points: <b>{pts}</b>\n"
-        f"💵 Naira Value: <b>₦{naira_val:.2f}</b>\n\n"
-        f"📊 Conversion Rate: {conv_pts} pts = ₦{conv_naira}\n"
-        f"📉 Min Withdrawal: {get_setting('min_withdrawal')} pts"
-    )
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Home", callback_data="home")]
-    ]), parse_mode="HTML")
-
-# ── Referrals ─────────────────────────────────────────────────
-async def cb_referrals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid      = query.from_user.id
-    u        = get_user(uid)
-    ref_code = u["referral_code"]
-    ref_link = f"https://t.me/{BOT_USERNAME}?start={ref_code}"
-    count    = get_referral_count(uid)
-    earnings = get_referral_earnings(uid)
-    reward   = get_setting("referral_reward")
-
-    text = (
-        f"👥 <b>Your Referrals</b>\n\n"
-        f"🔗 Your Link:\n<code>{ref_link}</code>\n\n"
-        f"👥 Total Referrals: <b>{count}</b>\n"
-        f"💰 Referral Earnings: <b>{earnings} pts</b>\n"
-        f"🎁 Reward per Referral: <b>{reward} pts</b>\n\n"
-        f"📌 Share your link. You earn {reward} pts when a friend completes onboarding!"
-    )
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Home", callback_data="home")]
-    ]), parse_mode="HTML")
-
-# ── Tasks ─────────────────────────────────────────────────────
-async def cb_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid  = query.from_user.id
-    conn = get_conn()
-    tasks = conn.execute("SELECT * FROM tasks WHERE is_active=1").fetchall()
-    conn.close()
-
-    if not tasks:
-        await query.edit_message_text("📋 No tasks available right now. Check back later!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]))
-        return
-
-    buttons = []
-    for t in tasks:
-        done = task_completed(uid, t["task_id"])
-        label = f"{'✅' if done else '🔲'} {t['title']} (+{t['reward']} pts)"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"task_{t['task_id']}")])
-    buttons.append([InlineKeyboardButton("🏠 Home", callback_data="home")])
-
-    await query.edit_message_text(
-        "📋 <b>Available Tasks</b>\n\nComplete tasks to earn points!",
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="HTML"
-    )
-
-async def cb_task_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    uid     = query.from_user.id
-    task_id = int(query.data.split("_")[1])
-    conn    = get_conn()
-    t       = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-    conn.close()
-
-    if not t:
-        await query.answer("Task not found.", show_alert=True)
-        return
-
-    done = task_completed(uid, task_id)
-    status = "✅ Completed" if done else "🔲 Not completed"
-
-    text = (
-        f"📋 <b>{t['title']}</b>\n\n"
-        f"{t['description']}\n\n"
-        f"🎁 Reward: <b>{t['reward']} pts</b>\n"
-        f"📌 Type: {t['task_type']}\n"
-        f"Status: {status}"
-    )
-    kb_rows = []
-    if not done:
-        if t["link"]:
-            kb_rows.append([InlineKeyboardButton("🔗 Open Link", callback_data=f"taskopen_{task_id}")])
-        kb_rows.append([InlineKeyboardButton("✅ Mark Complete", callback_data=f"taskdone_{task_id}")])
-    kb_rows.append([InlineKeyboardButton("◀️ Back to Tasks", callback_data="tasks")])
-
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode="HTML")
-
-async def cb_task_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    uid     = query.from_user.id
-    task_id = int(query.data.split("_")[1])
-    conn    = get_conn()
-    t       = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-    conn.close()
-    if t:
-        # Store that user opened the link
-        if "task_opened" not in context.user_data:
-            context.user_data["task_opened"] = set()
-        context.user_data["task_opened"].add(task_id)
-        await context.bot.send_message(uid, f"👉 Open this link:\n{t['link']}\n\nThen tap ✅ Mark Complete.")
-
-async def cb_task_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    uid     = query.from_user.id
-    task_id = int(query.data.split("_")[1])
-
-    if task_completed(uid, task_id):
-        await query.answer("✅ Already completed!", show_alert=True)
-        return
-
-    conn = get_conn()
-    t    = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-    conn.close()
-
-    # For link-based tasks, check if link was opened
-    opened = context.user_data.get("task_opened", set())
-    if t["link"] and task_id not in opened:
-        await query.answer("❌ Please open the link first!", show_alert=True)
-        return
-
-    if mark_task_done(uid, task_id):
-        add_points(uid, t["reward"], f"Task: {t['title']}")
-        await query.edit_message_text(
-            f"🎉 <b>Task Completed!</b>\n\n"
-            f"✅ {t['title']}\n"
-            f"🎁 +{t['reward']} points earned!",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📋 More Tasks", callback_data="tasks")],
-                [InlineKeyboardButton("🏠 Home", callback_data="home")],
-            ]),
-            parse_mode="HTML"
-        )
-
-# ── Profile ───────────────────────────────────────────────────
-async def cb_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid   = query.from_user.id
-    u     = get_user(uid)
-    count = get_referral_count(uid)
-    join  = u["join_date"][:10] if u["join_date"] else "N/A"
-
-    text = (
-        f"👤 <b>Your Profile</b>\n\n"
-        f"🆔 User ID: <code>{u['user_id']}</code>\n"
-        f"👤 Username: @{u['username'] or 'N/A'}\n"
-        f"💰 Points: <b>{u['points']}</b>\n"
-        f"👥 Referrals: <b>{count}</b>\n"
-        f"📈 Total Earned: <b>{u['total_earned']} pts</b>\n"
-        f"💸 Total Withdrawn: <b>{u['total_withdrawn']} pts</b>\n"
-        f"📅 Joined: <b>{join}</b>"
-    )
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Home", callback_data="home")]
-    ]), parse_mode="HTML")
-
-# ── Leaderboard ───────────────────────────────────────────────
-async def cb_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    conn  = get_conn()
-    rows  = conn.execute(
-        "SELECT first_name, username, points FROM users WHERE is_banned=0 ORDER BY points DESC LIMIT 10"
-    ).fetchall()
-    conn.close()
-
-    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-    lines  = [f"🏆 <b>Top 10 Leaderboard</b>\n"]
-    for i, r in enumerate(rows):
-        name = r["first_name"] or f"@{r['username']}" or "User"
-        lines.append(f"{medals[i]} {name} — <b>{r['points']} pts</b>")
-
-    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Home", callback_data="home")]
-    ]), parse_mode="HTML")
-
-# ── Help ──────────────────────────────────────────────────────
-async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    conv_pts   = get_setting("point_conversion_points")
-    conv_naira = get_setting("point_conversion_naira")
-    min_w      = get_setting("min_withdrawal")
-    ref_r      = get_setting("referral_reward")
-
-    text = (
-        f"❓ <b>How Nexarion Works</b>\n\n"
-        f"1️⃣ Join the channel & follow on X → earn points\n"
-        f"2️⃣ Complete tasks → earn more points\n"
-        f"3️⃣ Refer friends → earn <b>{ref_r} pts</b> per referral\n"
-        f"4️⃣ Withdraw → {conv_pts} pts = ₦{conv_naira} airtime\n\n"
-        f"💸 Minimum withdrawal: <b>{min_w} pts</b>\n\n"
-        f"📌 Your referral link is in the Referrals section.\n"
-        f"📩 Contact admin for issues."
-    )
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Home", callback_data="home")]
-    ]), parse_mode="HTML")
-
-# ── Home callback ─────────────────────────────────────────────
-async def cb_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await show_home_from_query(query, context)
-
-print("✅ User features loaded!")
-# ============================================================
-# CELL 6 - WITHDRAWAL SYSTEM
-# ============================================================
-
-NETWORKS = ["MTN", "Airtel", "Glo", "9mobile"]
-
-async def cb_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    u   = get_user(uid)
-
-    min_w      = int(get_setting("min_withdrawal"))
-    conv_pts   = int(get_setting("point_conversion_points"))
-    conv_naira = int(get_setting("point_conversion_naira"))
-    daily_lim  = float(get_setting("daily_limit_naira"))
-    daily_used = get_daily_withdrawn(uid)
-    daily_left = daily_lim - daily_used
-
-    if u["points"] < min_w:
-        await query.edit_message_text(
-            f"❌ <b>Insufficient Points</b>\n\n"
-            f"You need at least <b>{min_w} pts</b> to withdraw.\n"
-            f"Your balance: <b>{u['points']} pts</b>",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
-            parse_mode="HTML"
-        )
-        return
-
-    if daily_left <= 0:
-        await query.edit_message_text(
-            f"❌ <b>Daily Limit Reached</b>\n\nYou've reached your daily limit of ₦{daily_lim:.0f}.\nTry again tomorrow.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]),
-            parse_mode="HTML"
-        )
-        return
-
-    context.user_data["withdraw"] = {}
-    await query.edit_message_text(
-        f"💸 <b>Withdraw Airtime</b>\n\n"
-        f"💰 Your Points: <b>{u['points']}</b>\n"
-        f"📅 Daily Remaining: <b>₦{daily_left:.0f}</b>\n\n"
-        f"📱 Please enter your phone number:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="home")]]),
-        parse_mode="HTML"
-    )
-    return AWAIT_PHONE
-
-async def withdraw_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = update.message.text.strip()
-    if not (phone.isdigit() and len(phone) in [10, 11]):
-        await update.message.reply_text("❌ Invalid phone number. Please enter a valid Nigerian number (10 or 11 digits):")
-        return AWAIT_PHONE
-
-    context.user_data["withdraw"]["phone"] = phone
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("MTN", callback_data="net_MTN"),
-         InlineKeyboardButton("Airtel", callback_data="net_Airtel")],
-        [InlineKeyboardButton("Glo", callback_data="net_Glo"),
-         InlineKeyboardButton("9mobile", callback_data="net_9mobile")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="home")],
-    ])
-    await update.message.reply_text("📡 Select your network:", reply_markup=kb)
-    return AWAIT_NETWORK
-
-async def withdraw_network(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    network = query.data.replace("net_", "")
-    context.user_data["withdraw"]["network"] = network
-
-    uid        = query.from_user.id
-    u          = get_user(uid)
-    conv_pts   = int(get_setting("point_conversion_points"))
-    conv_naira = int(get_setting("point_conversion_naira"))
-    daily_lim  = float(get_setting("daily_limit_naira"))
-    daily_used = get_daily_withdrawn(uid)
-    daily_left = daily_lim - daily_used
-
-    pts         = u["points"]
-    max_naira   = min((pts / conv_pts) * conv_naira, daily_left)
-    pts_to_use  = int((max_naira / conv_naira) * conv_pts)
-    pts_to_use  = (pts_to_use // conv_pts) * conv_pts  # round down to nearest conversion block
-    naira_amt   = (pts_to_use / conv_pts) * conv_naira
-
-    context.user_data["withdraw"]["points"]      = pts_to_use
-    context.user_data["withdraw"]["naira"]        = naira_amt
-
-    text = (
-        f"💸 <b>Withdrawal Summary</b>\n\n"
-        f"📱 Phone: <b>{context.user_data['withdraw']['phone']}</b>\n"
-        f"📡 Network: <b>{network}</b>\n"
-        f"🔵 Points to deduct: <b>{pts_to_use}</b>\n"
-        f"💵 Airtime: <b>₦{naira_amt:.0f}</b>\n\n"
-        f"Confirm withdrawal?"
-    )
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Confirm", callback_data="withdraw_confirm"),
-         InlineKeyboardButton("❌ Cancel", callback_data="home")],
-    ]), parse_mode="HTML")
-    return AWAIT_CONFIRM
-
-async def withdraw_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid   = query.from_user.id
-    u     = get_user(uid)
-    wd    = context.user_data.get("withdraw", {})
-
-    pts        = wd.get("points", 0)
-    naira      = wd.get("naira", 0)
-    phone      = wd.get("phone", "")
-    network    = wd.get("network", "")
-
-    if u["points"] < pts:
-        await query.edit_message_text("❌ Insufficient points.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="home")]]))
-        return ConversationHandler.END
-
-    # Save withdrawal request
-    conn = get_conn()
-    conn.execute("""
-        INSERT INTO withdrawals (user_id, phone, network, points, amount_naira, status, created_at)
-        VALUES (?,?,?,?,?,'pending',?)
-    """, (uid, phone, network, pts, naira, datetime.now().isoformat()))
-    wid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.commit()
-    conn.close()
-
-    # Deduct points immediately
-    deduct_points(uid, pts, f"Withdrawal ₦{naira:.0f} to {phone} ({network})")
-
-    # Try Gsubz API
-    auto_success = await try_gsubz(phone, network, naira, wid)
-
-    if auto_success:
-        conn = get_conn()
-        conn.execute("UPDATE withdrawals SET status='paid' WHERE id=?", (wid,))
-        conn.commit()
-        conn.close()
-        text = (
-            f"✅ <b>Airtime Sent!</b>\n\n"
-            f"📱 {phone} ({network})\n"
-            f"💵 ₦{naira:.0f} airtime delivered!\n"
-            f"🔵 {pts} points deducted."
-        )
-    else:
-        text = (
-            f"⏳ <b>Withdrawal Submitted!</b>\n\n"
-            f"📱 {phone} ({network})\n"
-            f"💵 ₦{naira:.0f} airtime requested.\n"
-            f"🔵 {pts} points deducted.\n\n"
-            f"Your request is pending admin approval."
-        )
-        # Notify admin
-        try:
-            await context.bot.send_message(
-                ADMIN_ID,
-                f"💸 <b>New Withdrawal Request #{wid}</b>\n\n"
-                f"👤 User: {uid} (@{u['username'] or 'N/A'})\n"
-                f"📱 {phone} ({network})\n"
-                f"💵 ₦{naira:.0f}\n"
-                f"🔵 {pts} pts",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Approve", callback_data=f"approve_{wid}"),
-                     InlineKeyboardButton("❌ Reject", callback_data=f"reject_{wid}")],
-                ]),
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
-
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Home", callback_data="home")]
-    ]), parse_mode="HTML")
-    return ConversationHandler.END
-
-async def try_gsubz(phone, network, amount, wid):
-    """Attempt Gsubz API for auto airtime topup."""
-    net_map = {"MTN": "mtn", "Airtel": "airtel", "Glo": "glo", "9mobile": "9mobile"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            payload = {
-                "api_key": GSUBZ_API_KEY,
-                "network": net_map.get(network, network.lower()),
-                "phone":   phone,
-                "amount":  int(amount),
-                "type":    "airtime",
-            }
-            async with session.post(f"{GSUBZ_BASE_URL}/topup", json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                data = await resp.json()
-                return data.get("status") in ("success", "successful", True, "true")
-    except Exception as e:
-        logger.error(f"Gsubz API error: {e}")
-        return False
-
-# ── Admin Withdrawal Approval ─────────────────────────────────
-async def cb_approve_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.from_user.id != ADMIN_ID and not is_admin(query.from_user.id):
-        return
-    wid = int(query.data.split("_")[1])
-    conn = get_conn()
-    w = conn.execute("SELECT * FROM withdrawals WHERE id=?", (wid,)).fetchone()
-    if w and w["status"] == "pending":
-        conn.execute("UPDATE withdrawals SET status='paid' WHERE id=?", (wid,))
-        conn.commit()
-        try:
-            await context.bot.send_message(w["user_id"],
-                f"✅ Your withdrawal of ₦{w['amount_naira']:.0f} to {w['phone']} has been approved and paid!")
-        except Exception:
-            pass
-    conn.close()
-    await query.edit_message_text(f"✅ Withdrawal #{wid} approved and marked paid.")
-
-async def cb_reject_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.from_user.id != ADMIN_ID and not is_admin(query.from_user.id):
-        return
-    wid = int(query.data.split("_")[1])
-    conn = get_conn()
-    w = conn.execute("SELECT * FROM withdrawals WHERE id=?", (wid,)).fetchone()
-    if w and w["status"] == "pending":
-        conn.execute("UPDATE withdrawals SET status='rejected' WHERE id=?", (wid,))
-        conn.commit()
-        # Refund points
-        add_points(w["user_id"], w["points"], f"Refund: Rejected withdrawal #{wid}", "refund")
-        try:
-            await context.bot.send_message(w["user_id"],
-                f"❌ Your withdrawal of ₦{w['amount_naira']:.0f} was rejected. {w['points']} points refunded.")
-        except Exception:
-            pass
-    conn.close()
-    await query.edit_message_text(f"❌ Withdrawal #{wid} rejected. Points refunded.")
-
-print("✅ Withdrawal system loaded!")
-# ============================================================
-# CELL 7 - ADMIN PANEL
-# ============================================================
-
-def admin_only(func):
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        uid = update.effective_user.id
-        if uid != ADMIN_ID and not is_admin(uid):
-            if update.message:
-                await update.message.reply_text("🚫 Admin only.")
-            return ConversationHandler.END
-        return await func(update, context)
-    wrapper.__name__ = func.__name__
-    return wrapper
-
-# ── Dashboard ─────────────────────────────────────────────────
-@admin_only
-async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = get_conn()
-    total_users  = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    total_pts    = conn.execute("SELECT COALESCE(SUM(points),0) FROM transactions WHERE type='earn'").fetchone()[0]
-    total_w      = conn.execute("SELECT COUNT(*) FROM withdrawals").fetchone()[0]
-    pending_w    = conn.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'").fetchone()[0]
-    conn.close()
-
-    text = (
-        f"🛠️ <b>Admin Dashboard</b>\n\n"
-        f"👥 Total Users: <b>{total_users}</b>\n"
-        f"🔵 Points Distributed: <b>{total_pts}</b>\n"
-        f"💸 Total Withdrawals: <b>{total_w}</b>\n"
-        f"⏳ Pending Withdrawals: <b>{pending_w}</b>\n\n"
-        f"<b>Commands:</b>\n"
-        f"/addtask — Add a new task\n"
-        f"/removetask [id] — Remove task\n"
-        f"/activatetask [id] — Activate task\n"
-        f"/deactivatetask [id] — Deactivate task\n"
-        f"/searchuser [id] — Find user\n"
-        f"/addpoints [id] [pts] — Add points\n"
-        f"/removepoints [id] [pts] — Remove points\n"
-        f"/banuser [id] — Ban user\n"
-        f"/unbanuser [id] — Unban user\n"
-        f"/withdrawals — View pending withdrawals\n"
-        f"/broadcast — Broadcast message\n"
-        f"/setreferralreward [pts] — Update referral reward\n"
-        f"/setconversion [pts] [₦] — Update conversion rate\n"
-        f"/setdailylimit [₦] — Update daily limit\n"
-        f"/setwelcome [msg] — Update welcome message"
-    )
-    await update.message.reply_text(text, parse_mode="HTML")
-
-# ── Task Management ───────────────────────────────────────────
-@admin_only
-async def cmd_addtask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📋 <b>Add Task</b>\n\nEnter task title:", parse_mode="HTML")
-    return AWAIT_TASK_TITLE
-
-async def addtask_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["newtask"] = {"title": update.message.text.strip()}
-    await update.message.reply_text("📝 Enter task description:")
-    return AWAIT_TASK_DESC
-
-async def addtask_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["newtask"]["description"] = update.message.text.strip()
-    await update.message.reply_text("🔗 Enter task link (or send 'none'):")
-    return AWAIT_TASK_LINK
-
-async def addtask_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = update.message.text.strip()
-    context.user_data["newtask"]["link"] = "" if txt.lower() == "none" else txt
-    await update.message.reply_text("🎁 Enter reward points (number):")
-    return AWAIT_TASK_REWARD
-
-async def addtask_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = update.message.text.strip()
-    if not txt.isdigit():
-        await update.message.reply_text("❌ Enter a valid number:")
-        return AWAIT_TASK_REWARD
-    context.user_data["newtask"]["reward"] = int(txt)
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Telegram Join",  callback_data="ttype_telegram_join"),
-         InlineKeyboardButton("Twitter Follow", callback_data="ttype_twitter_follow")],
-        [InlineKeyboardButton("Twitter Like",   callback_data="ttype_twitter_like"),
-         InlineKeyboardButton("Twitter Repost", callback_data="ttype_twitter_repost")],
-        [InlineKeyboardButton("Website Visit",  callback_data="ttype_website_visit"),
-         InlineKeyboardButton("Custom",         callback_data="ttype_custom")],
-    ])
-    await update.message.reply_text("📌 Select task type:", reply_markup=kb)
-    return AWAIT_TASK_TYPE
-
-async def addtask_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    task_type = query.data.replace("ttype_", "")
-    nt = context.user_data["newtask"]
-    conn = get_conn()
-    conn.execute(
-        "INSERT INTO tasks (title, description, link, reward, task_type) VALUES (?,?,?,?,?)",
-        (nt["title"], nt["description"], nt["link"], nt["reward"], task_type)
-    )
-    conn.commit()
-    conn.close()
-    await query.edit_message_text(
-        f"✅ Task added!\n\n"
-        f"📋 {nt['title']}\n🎁 {nt['reward']} pts\n📌 {task_type}"
-    )
-    return ConversationHandler.END
-
-@admin_only
-async def cmd_removetask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args or not args[0].isdigit():
-        # Show list
-        conn = get_conn()
-        tasks = conn.execute("SELECT * FROM tasks").fetchall()
-        conn.close()
-        lines = ["📋 <b>All Tasks (use /removetask [id])</b>\n"]
-        for t in tasks:
-            lines.append(f"ID {t['task_id']}: {t['title']} ({'Active' if t['is_active'] else 'Inactive'})")
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-        return
-    tid = int(args[0])
-    conn = get_conn()
-    conn.execute("DELETE FROM tasks WHERE task_id=?", (tid,))
-    conn.commit()
-    conn.close()
-    await update.message.reply_text(f"✅ Task {tid} removed.")
-
-@admin_only
-async def cmd_activatetask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("Usage: /activatetask [task_id]"); return
-    tid = int(args[0])
-    conn = get_conn()
-    conn.execute("UPDATE tasks SET is_active=1 WHERE task_id=?", (tid,))
-    conn.commit(); conn.close()
-    await update.message.reply_text(f"✅ Task {tid} activated.")
-
-@admin_only
-async def cmd_deactivatetask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("Usage: /deactivatetask [task_id]"); return
-    tid = int(args[0])
-    conn = get_conn()
-    conn.execute("UPDATE tasks SET is_active=0 WHERE task_id=?", (tid,))
-    conn.commit(); conn.close()
-    await update.message.reply_text(f"✅ Task {tid} deactivated.")
-
-# ── User Management ───────────────────────────────────────────
-@admin_only
-async def cmd_searchuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /searchuser [user_id or username]"); return
-    q = args[0].replace("@", "")
-    conn = get_conn()
-    if q.isdigit():
-        u = conn.execute("SELECT * FROM users WHERE user_id=?", (int(q),)).fetchone()
-    else:
-        u = conn.execute("SELECT * FROM users WHERE username=?", (q,)).fetchone()
-    conn.close()
-    if not u:
-        await update.message.reply_text("❌ User not found."); return
-    ref_count = get_referral_count(u["user_id"])
-    text = (
-        f"👤 <b>User Info</b>\n\n"
-        f"🆔 ID: <code>{u['user_id']}</code>\n"
-        f"👤 Username: @{u['username'] or 'N/A'}\n"
-        f"💰 Points: <b>{u['points']}</b>\n"
-        f"👥 Referrals: <b>{ref_count}</b>\n"
-        f"📈 Total Earned: {u['total_earned']}\n"
-        f"💸 Total Withdrawn: {u['total_withdrawn']}\n"
-        f"✅ Onboarding: {'Done' if u['onboarding_complete'] else 'Pending'}\n"
-        f"🚫 Banned: {'Yes' if u['is_banned'] else 'No'}\n"
-        f"📅 Joined: {u['join_date'][:10] if u['join_date'] else 'N/A'}"
-    )
-    await update.message.reply_text(text, parse_mode="HTML")
-
-@admin_only
-async def cmd_addpoints(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
-        await update.message.reply_text("Usage: /addpoints [user_id] [points]"); return
-    uid, pts = int(args[0]), int(args[1])
-    u = get_user(uid)
-    if not u:
-        await update.message.reply_text("❌ User not found."); return
-    add_points(uid, pts, "Admin added points", "admin_add")
-    await update.message.reply_text(f"✅ Added {pts} points to user {uid}.")
-    try:
-        await context.bot.send_message(uid, f"🎁 Admin added <b>{pts} points</b> to your account!", parse_mode="HTML")
-    except Exception: pass
-
-@admin_only
-async def cmd_removepoints(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
-        await update.message.reply_text("Usage: /removepoints [user_id] [points]"); return
-    uid, pts = int(args[0]), int(args[1])
-    u = get_user(uid)
-    if not u:
-        await update.message.reply_text("❌ User not found."); return
-    deduct_points(uid, pts, "Admin removed points", "admin_remove")
-    await update.message.reply_text(f"✅ Removed {pts} points from user {uid}.")
-
-@admin_only
-async def cmd_banuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("Usage: /banuser [user_id]"); return
-    uid = int(args[0])
-    conn = get_conn()
-    conn.execute("UPDATE users SET is_banned=1 WHERE user_id=?", (uid,))
-    conn.commit(); conn.close()
-    await update.message.reply_text(f"🚫 User {uid} banned.")
-
-@admin_only
-async def cmd_unbanuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("Usage: /unbanuser [user_id]"); return
-    uid = int(args[0])
-    conn = get_conn()
-    conn.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (uid,))
-    conn.commit(); conn.close()
-    await update.message.reply_text(f"✅ User {uid} unbanned.")
-
-# ── Withdrawals List ──────────────────────────────────────────
-@admin_only
-async def cmd_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = get_conn()
-    rows = conn.execute("SELECT * FROM withdrawals WHERE status='pending' ORDER BY created_at DESC LIMIT 20").fetchall()
-    conn.close()
-    if not rows:
-        await update.message.reply_text("✅ No pending withdrawals."); return
-    for w in rows:
-        text = (
-            f"💸 <b>Withdrawal #{w['id']}</b>\n"
-            f"👤 User: {w['user_id']}\n"
-            f"📱 {w['phone']} ({w['network']})\n"
-            f"💵 ₦{w['amount_naira']:.0f} | {w['points']} pts\n"
-            f"📅 {w['created_at'][:16]}"
-        )
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Approve", callback_data=f"approve_{w['id']}"),
-             InlineKeyboardButton("❌ Reject", callback_data=f"reject_{w['id']}")],
-        ]), parse_mode="HTML")
-
-# ── Broadcast ─────────────────────────────────────────────────
-@admin_only
-async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📢 <b>Broadcast</b>\n\nSelect type:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Text", callback_data="bc_text"),
-             InlineKeyboardButton("🖼 Photo", callback_data="bc_photo")],
-            [InlineKeyboardButton("🎥 Video", callback_data="bc_video"),
-             InlineKeyboardButton("📄 Document", callback_data="bc_document")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="bc_cancel")],
-        ]),
-        parse_mode="HTML"
-    )
-    return AWAIT_BROADCAST_TYPE
-
-async def broadcast_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == "bc_cancel":
-        await query.edit_message_text("❌ Broadcast cancelled.")
-        return ConversationHandler.END
-    bc_type = query.data.replace("bc_", "")
-    context.user_data["bc_type"] = bc_type
-    prompts = {
-        "text": "Send the text message to broadcast:",
-        "photo": "Send the photo to broadcast (with caption if needed):",
-        "video": "Send the video to broadcast (with caption if needed):",
-        "document": "Send the document to broadcast:",
-    }
-    await query.edit_message_text(prompts.get(bc_type, "Send content:"))
-    return AWAIT_BROADCAST_CONTENT
-
-async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bc_type = context.user_data.get("bc_type", "text")
-    conn    = get_conn()
-    users   = conn.execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
-    conn.close()
-
-    sent = failed = 0
-    for row in users:
-        uid = row["user_id"]
-        try:
-            if bc_type == "text":
-                await context.bot.send_message(uid, update.message.text, parse_mode="HTML")
-            elif bc_type == "photo" and update.message.photo:
-                await context.bot.send_photo(uid, update.message.photo[-1].file_id,
-                                             caption=update.message.caption or "")
-            elif bc_type == "video" and update.message.video:
-                await context.bot.send_video(uid, update.message.video.file_id,
-                                             caption=update.message.caption or "")
-            elif bc_type == "document" and update.message.document:
-                await context.bot.send_document(uid, update.message.document.file_id,
-                                                caption=update.message.caption or "")
-            sent += 1
-        except Exception:
-            failed += 1
-
-    await update.message.reply_text(f"📢 Broadcast done!\n✅ Sent: {sent}\n❌ Failed: {failed}")
-    return ConversationHandler.END
-
-# ── Settings ──────────────────────────────────────────────────
-@admin_only
-async def cmd_setreferralreward(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("Usage: /setreferralreward [points]"); return
-    set_setting("referral_reward", args[0])
-    await update.message.reply_text(f"✅ Referral reward set to {args[0]} pts.")
-
-@admin_only
-async def cmd_setconversion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
-        await update.message.reply_text("Usage: /setconversion [points] [naira]"); return
-    set_setting("point_conversion_points", args[0])
-    set_setting("point_conversion_naira", args[1])
-    await update.message.reply_text(f"✅ Conversion set: {args[0]} pts = ₦{args[1]}")
-
-@admin_only
-async def cmd_setdailylimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("Usage: /setdailylimit [naira]"); return
-    set_setting("daily_limit_naira", args[0])
-    await update.message.reply_text(f"✅ Daily limit set to ₦{args[0]}")
-
-@admin_only
-async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /setwelcome [message]"); return
-    msg = " ".join(args)
-    set_setting("welcome_message", msg)
-    await update.message.reply_text("✅ Welcome message updated.")
-
-print("✅ Admin panel loaded!")
-# ============================================================
-# CELL 8 - MAIN BOT RUNNER
-# Paste ALL previous cells ABOVE this one, then run this cell
-# ============================================================
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Exception: {context.error}", exc_info=context.error)
-
-def build_app():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # ── Withdrawal Conversation ────────────────────────────────
-    withdraw_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(cb_withdraw, pattern="^withdraw$")],
-        states={
-            AWAIT_PHONE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_phone)],
-            AWAIT_NETWORK: [CallbackQueryHandler(withdraw_network, pattern="^net_")],
-            AWAIT_CONFIRM: [CallbackQueryHandler(withdraw_confirm, pattern="^withdraw_confirm$")],
-        },
-        fallbacks=[CallbackQueryHandler(cb_home, pattern="^home$")],
-        per_message=False,
-    )
-
-    # ── Broadcast Conversation ─────────────────────────────────
-    broadcast_conv = ConversationHandler(
-        entry_points=[CommandHandler("broadcast", cmd_broadcast)],
-        states={
-            AWAIT_BROADCAST_TYPE: [CallbackQueryHandler(broadcast_type, pattern="^bc_")],
-            AWAIT_BROADCAST_CONTENT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_send),
-                MessageHandler(filters.PHOTO, broadcast_send),
-                MessageHandler(filters.VIDEO, broadcast_send),
-                MessageHandler(filters.Document.ALL, broadcast_send),
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
-        per_message=False,
-    )
-
-    # ── Add Task Conversation ──────────────────────────────────
-    addtask_conv = ConversationHandler(
-        entry_points=[CommandHandler("addtask", cmd_addtask)],
-        states={
-            AWAIT_TASK_TITLE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_title)],
-            AWAIT_TASK_DESC:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_desc)],
-            AWAIT_TASK_LINK:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_link)],
-            AWAIT_TASK_REWARD: [MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_reward)],
-            AWAIT_TASK_TYPE:   [CallbackQueryHandler(addtask_type, pattern="^ttype_")],
-        },
-        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
-        per_message=False,
-    )
-
-    # ── Register all handlers ──────────────────────────────────
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("admin", cmd_admin))
-    app.add_handler(CommandHandler("removetask", cmd_removetask))
-    app.add_handler(CommandHandler("activatetask", cmd_activatetask))
-    app.add_handler(CommandHandler("deactivatetask", cmd_deactivatetask))
-    app.add_handler(CommandHandler("searchuser", cmd_searchuser))
-    app.add_handler(CommandHandler("addpoints", cmd_addpoints))
-    app.add_handler(CommandHandler("removepoints", cmd_removepoints))
-    app.add_handler(CommandHandler("banuser", cmd_banuser))
-    app.add_handler(CommandHandler("unbanuser", cmd_unbanuser))
-    app.add_handler(CommandHandler("withdrawals", cmd_withdrawals))
-    app.add_handler(CommandHandler("setreferralreward", cmd_setreferralreward))
-    app.add_handler(CommandHandler("setconversion", cmd_setconversion))
-    app.add_handler(CommandHandler("setdailylimit", cmd_setdailylimit))
-    app.add_handler(CommandHandler("setwelcome", cmd_setwelcome))
-
-    # Conversations (must be added before generic callbacks)
-    app.add_handler(withdraw_conv)
-    app.add_handler(broadcast_conv)
-    app.add_handler(addtask_conv)
-
-    # Onboarding callbacks
-    app.add_handler(CallbackQueryHandler(cb_verify_channel, pattern="^verify_channel$"))
-    app.add_handler(CallbackQueryHandler(cb_open_twitter,   pattern="^open_twitter$"))
-    app.add_handler(CallbackQueryHandler(cb_verify_twitter, pattern="^verify_twitter$"))
-
-    # Home menu callbacks
-    app.add_handler(CallbackQueryHandler(cb_home,        pattern="^home$"))
-    app.add_handler(CallbackQueryHandler(cb_balance,     pattern="^bal$"))
-    app.add_handler(CallbackQueryHandler(cb_referrals,   pattern="^referrals$"))
-    app.add_handler(CallbackQueryHandler(cb_tasks,       pattern="^tasks$"))
-    app.add_handler(CallbackQueryHandler(cb_profile,     pattern="^profile$"))
-    app.add_handler(CallbackQueryHandler(cb_leaderboard, pattern="^leaderboard$"))
-    app.add_handler(CallbackQueryHandler(cb_help,        pattern="^help$"))
-
-    # Task callbacks
-    app.add_handler(CallbackQueryHandler(cb_task_detail, pattern=r"^task_\d+$"))
-    app.add_handler(CallbackQueryHandler(cb_task_open,   pattern=r"^taskopen_\d+$"))
-    app.add_handler(CallbackQueryHandler(cb_task_done,   pattern=r"^taskdone_\d+$"))
-
-    # Admin withdrawal approval
-    app.add_handler(CallbackQueryHandler(cb_approve_withdrawal, pattern=r"^approve_\d+$"))
-    app.add_handler(CallbackQueryHandler(cb_reject_withdrawal,  pattern=r"^reject_\d+$"))
-
-    app.add_error_handler(error_handler)
-    return app
-
-# ── Run ───────────────────────────────────────────────────────
-nest_asyncio.apply()
-
-print("🚀 Starting Nexarion Rewards Bot...")
-app = build_app()
-app.run_polling(drop_pending_updates=True)
+        conn.execute("UPDATE referrals SET rewarded=1 WHERE 
