@@ -2,5 +2,7 @@ services:
   - type: worker
     name: nexarion-bot
     env: python
+    pythonVersion: "3.11.0"
     buildCommand: pip install -r requirements.txt
     startCommand: python nexarion_bot_FULL.py
+    
